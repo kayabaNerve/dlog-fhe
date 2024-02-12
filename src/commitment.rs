@@ -10,7 +10,7 @@ pub struct Commitment(u8);
 impl Add<u8> for Commitment {
   type Output = Commitment;
   fn add(self, y: u8) -> Self {
-     Commitment((self.0 + y) % 4)
+    Commitment((self.0 + y) % 4)
   }
 }
 impl Add<Commitment> for Commitment {

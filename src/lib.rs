@@ -1,3 +1,5 @@
+mod joye_libert;
+
 mod commitment;
 pub use commitment::Commitment;
 
