@@ -1,12 +1,10 @@
-use core::cmp::Ordering;
-
 use rand_core::{RngCore, CryptoRng};
 
 use crypto_bigint::{Encoding, Uint};
 use crypto_primes::generate_prime_with_rng;
 
 use malachite::{
-  num::{basic::traits::*, arithmetic::traits::*, logic::traits::*, conversion::traits::*},
+  num::{basic::traits::*, arithmetic::traits::*, conversion::traits::*},
   *,
 };
 
@@ -28,7 +26,8 @@ pub struct PrivateKey {
   public_key: PublicKey,
 }
 
-struct Ciphertext(Natural);
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ciphertext(Natural);
 
 impl PrivateKey {
   pub fn new<R: RngCore + CryptoRng>(rng: &mut R) -> (PrivateKey, PublicKey) {
@@ -129,7 +128,7 @@ impl PrivateKey {
 }
 
 impl PublicKey {
-  pub fn encrypt<R: RngCore + CryptoRng>(&self, rng: &mut R, message: u8) -> (Natural, Ciphertext) {
+  pub fn encrypt<R: RngCore + CryptoRng>(&self, rng: &mut R, message: u8) -> Ciphertext {
     assert!(message < 4);
 
     let x = loop {
@@ -142,81 +141,56 @@ impl PublicKey {
       }
     };
 
-    // TODO: Check the security of using pow(8)
-    (
-      x.clone(),
-      Ciphertext(
-        (self.g.clone().mod_pow(&Natural::from(message), &self.N) *
-          x.mod_pow(&Natural::from(2u8.pow(8)), &self.N)) %
-          &self.N,
-      ),
+    // TODO: Check the security of using pow(8). This tweak was needed for halving to work.
+    Ciphertext(
+      (self.g.clone().mod_pow(&Natural::from(message), &self.N) *
+        x.mod_pow(&Natural::from(2u8.pow(8)), &self.N)) %
+        &self.N,
     )
 
     // Jacobi C / N checks its validity
   }
-}
 
-#[test]
-fn test_joye_libert() {
-  use rand_core::OsRng;
-  let (private, public) = PrivateKey::new(&mut OsRng);
-  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 0).1), Some(0));
-  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 1).1), Some(1));
-  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 2).1), Some(2));
-  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 3).1), Some(3));
-}
+  pub fn add(&self, c1: Ciphertext, c2: Ciphertext) -> Ciphertext {
+    Ciphertext((c1.0 * c2.0) % &self.N)
+  }
 
-#[test]
-fn test_homomorphic() {
-  use rand_core::OsRng;
-  let (private, public) = PrivateKey::new(&mut OsRng);
-  for c1 in 0 .. 4 {
-    let cipher1 = public.encrypt(&mut OsRng, c1).1;
-    for c2 in 0 .. 4 {
-      let cipher2 = public.encrypt(&mut OsRng, c2).1;
-      // Addition via multiplying ciphertexts
-      assert_eq!(
-        private.decrypt(Ciphertext((&cipher1.0 * cipher2.0) % &public.N)),
-        Some((c1 + c2) % 4)
-      );
-      // Multiplication by a scalar via pow
-      assert_eq!(
-        private.decrypt(Ciphertext(cipher1.0.clone().mod_pow(Natural::from(c2), &public.N))),
-        Some((c1 * c2) % 4)
-      );
+  pub fn add_int(&self, c1: Ciphertext, value: u8) -> Ciphertext {
+    assert!(value < 4);
+    Ciphertext((c1.0 * self.g.clone().mod_pow(Natural::from(value), &self.N)) % &self.N)
+  }
+
+  pub fn mul(&self, c1: Ciphertext, scalar: u8) -> Ciphertext {
+    assert!(scalar < 4);
+    Ciphertext(c1.0.mod_pow(Natural::from(scalar), &self.N))
+  }
+
+  /// Convert a ciphertext for 2 or 0 to a ciphertext for 1 or 0.
+  ///
+  /// Ciphertexts for any other value are undefined.
+  pub fn half(&self, ciphertext: Ciphertext) -> Ciphertext {
+    // Multiplicative inverse via extended euclid
+    fn inverse(a: &Integer, n: &Integer) -> Natural {
+      let mut t = Integer::ZERO;
+      let mut r = n.clone();
+      let mut newt = Integer::ONE;
+      let mut newr = a.clone();
+
+      while newr != Integer::ZERO {
+        let quotient = &r / &newr;
+        (t, newt) = (newt.clone(), t - (&quotient * newt));
+        (r, newr) = (newr.clone(), r - (quotient * newr));
+      }
+
+      if r > Integer::ONE {
+        panic!("no inverse");
+      }
+      if t < Integer::ZERO {
+        t += n;
+      }
+
+      t.unsigned_abs()
     }
-  }
-}
-
-fn inverse(a: &Integer, n: &Integer) -> Natural {
-  let mut t = Integer::ZERO;
-  let mut r = n.clone();
-  let mut newt = Integer::ONE;
-  let mut newr = a.clone();
-
-  while newr != Integer::ZERO {
-    let quotient = &r / &newr;
-    (t, newt) = (newt.clone(), t - (&quotient * newt));
-    (r, newr) = (newr.clone(), r - (quotient * newr));
-  }
-
-  if r > Integer::ONE {
-    panic!("no inverse");
-  }
-  if t < Integer::ZERO {
-    t += n;
-  }
-
-  t.unsigned_abs()
-}
-
-#[test]
-fn test_halving() {
-  use rand_core::OsRng;
-  for i in 0 .. 128 {
-    dbg!(i);
-
-    let (private, public) = PrivateKey::new(&mut OsRng);
 
     // 1       -> 1
     // g ** 2  -> g
@@ -228,10 +202,6 @@ fn test_halving() {
     // Solve for x
     //
     // (g * g * x) - (x - 1) = g
-    // (g * g * x) + x + 1 = g
-    // (g * g * x) + x = g - 1
-    // (g * g) + 1 = (g - 1)/x
-
     // (g * g * x) = g + (x - 1)
     // g * g = (g + (x - 1))/x
     // g * g = g/x + (1 - (1/x))
@@ -240,37 +210,71 @@ fn test_halving() {
     // g * g + -1 = g/x - 1/x
     // g * g + -1 = (g-1)/x
 
-    let lhs = (&public.g * &public.g) - Natural::ONE;
-    let rhs_numerator = &public.g - Natural::ONE;
+    let lhs = (&self.g * &self.g) - Natural::ONE;
+    let rhs_numerator = &self.g - Natural::ONE;
 
     // (g * g + -1) / (g - 1) = 1/x
     let denominator = rhs_numerator;
-    let inv_denom = inverse(&Integer::from(denominator), &Integer::from(public.N.clone()));
+    let inv_denom = inverse(&Integer::from(denominator), &Integer::from(self.N.clone()));
     let x = lhs * inv_denom;
     // 1/x -> x
-    let x = inverse(&Integer::from(x), &Integer::from(public.N.clone()));
+    let x = inverse(&Integer::from(x), &Integer::from(self.N.clone()));
 
-    assert_eq!((Natural::ONE * &x) - (&x - Natural::ONE), Natural::ONE);
-    assert_eq!(
-      ((public.g.clone().mod_pow(Natural::from(2u8), &public.N) * &x) - (&x - Natural::ONE)) %
-        &public.N,
-      public.g
+    debug_assert_eq!((Natural::ONE * &x) - (&x - Natural::ONE), Natural::ONE);
+    debug_assert_eq!(
+      ((self.g.clone().mod_pow(Natural::from(2u8), &self.N) * &x) - (&x - Natural::ONE)) % &self.N,
+      self.g
     );
 
-    let transform = |ciphertext: Ciphertext| {
-      let lhs = (ciphertext.0 * &x) % &public.N;
-      let rhs = &x - Natural::ONE;
-      let res = (if lhs > rhs { lhs - rhs } else { lhs + (&public.N - rhs) }) % &public.N;
-      Ciphertext(res)
-    };
+    let lhs = (ciphertext.0 * &x) % &self.N;
+    let rhs = &x - Natural::ONE;
+    Ciphertext((if lhs > rhs { lhs - rhs } else { lhs + (&self.N - rhs) }) % &self.N)
+  }
+}
 
-    assert_eq!(private.decrypt(transform(public.encrypt(&mut OsRng, 0).1)), Some(0));
-    assert_eq!(private.decrypt(transform(public.encrypt(&mut OsRng, 2).1)), Some(1));
+#[test]
+fn test_joye_libert() {
+  use rand_core::OsRng;
+  let (private, public) = PrivateKey::new(&mut OsRng);
+  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 0)), Some(0));
+  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 1)), Some(1));
+  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 2)), Some(2));
+  assert_eq!(private.decrypt(public.encrypt(&mut OsRng, 3)), Some(3));
+}
 
-    let already_halved = transform(public.encrypt(&mut OsRng, 2).1);
+#[test]
+fn test_homomorphic() {
+  use rand_core::OsRng;
+  let (private, public) = PrivateKey::new(&mut OsRng);
+  for c1 in 0 .. 4 {
+    let cipher1 = public.encrypt(&mut OsRng, c1);
+    for c2 in 0 .. 4 {
+      let cipher2 = public.encrypt(&mut OsRng, c2);
+      // Integer addition
+      assert_eq!(private.decrypt(public.add_int(cipher1.clone(), c2)), Some((c1 + c2) % 4));
+      // Ciphertext addition
+      assert_eq!(private.decrypt(public.add(cipher1.clone(), cipher2)), Some((c1 + c2) % 4));
+      // Multiplication by a scalar
+      assert_eq!(private.decrypt(public.mul(cipher1.clone(), c2)), Some((c1 * c2) % 4));
+    }
+  }
+}
+
+#[test]
+fn test_halving() {
+  use rand_core::OsRng;
+  for i in 0 .. 128 {
+    dbg!(i);
+
+    let (private, public) = PrivateKey::new(&mut OsRng);
+
+    assert_eq!(private.decrypt(public.half(public.encrypt(&mut OsRng, 0))), Some(0));
+    assert_eq!(private.decrypt(public.half(public.encrypt(&mut OsRng, 2))), Some(1));
+
+    let already_halved = public.half(public.encrypt(&mut OsRng, 2));
     // Scale back to 2
     let back = Ciphertext(already_halved.0.clone().mod_pow(Natural::from(2u8), &public.N));
     // Check this still works
-    assert_eq!(private.decrypt(transform(back)), Some(1));
+    assert_eq!(private.decrypt(public.half(back)), Some(1));
   }
 }
