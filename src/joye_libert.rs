@@ -22,7 +22,6 @@ pub struct PublicKey {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PrivateKey {
   p: Natural,
-  u: Natural,
   public_key: PublicKey,
 }
 
@@ -72,10 +71,8 @@ impl PrivateKey {
 
     let N = &p * &q;
 
-    let p_apostrophe = (&p - Natural::ONE) / Natural::from(2u8.pow(2));
-
     let public_key = PublicKey { g, N };
-    (PrivateKey { p, u: p_apostrophe, public_key: public_key.clone() }, public_key)
+    (PrivateKey { p, public_key: public_key.clone() }, public_key)
   }
 
   pub fn decrypt(&self, ciphertext: Ciphertext) -> Option<u8> {
